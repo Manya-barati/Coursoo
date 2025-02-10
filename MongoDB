@@ -1,0 +1,51 @@
+from fastapi import FastAPI, Depends
+from pydantic import BaseModel
+from motor.motor_asyncio import AsyncIOMotorClient
+from bson import ObjectId
+import uvicorn
+import bcrypt
+
+# Initialize FastAPI
+app = FastAPI()
+
+# MongoDB Connection
+MONGO_URI = "mongodb+srv://manyabarati:<db_password>@courso.blab1.mongodb.net/?retryWrites=true&w=majority&appName=courso"
+client = AsyncIOMotorClient(MONGO_URI)
+db = client.courso
+
+
+class User(BaseModel):
+    username: str
+    email: str
+    password: str  # remmember to hash passwords! (I should search more in plasmic)
+
+def user_serializer(user) -> dict:
+    return {"id": str(user["_id"]), "username": user["username"], "email": user["email"]}
+
+
+# API Endpoints
+@app.post("/register")
+async def register_user(user: User):
+    user_dict = user.dict()
+    result = await db.users.insert_one(user_dict)
+    return {"message": "User created", "id": str(result.inserted_id)}
+
+
+@app.post("/login")
+async def login(user: User):
+    stored_user = await db.users.find_one({"email": user.email})
+    if not stored_user or stored_user["password"] != user.password:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    return {"message": "Login successful!"}
+
+
+@app.get("/users/{user_id}")
+async def get_user(user_id: str):
+    user = await db.users.find_one({"_id": ObjectId(user_id)})
+    if user:
+        return user_serializer(user)
+    return {"error": "User not found"}
+
+# Run the server
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
