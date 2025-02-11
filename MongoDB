@@ -14,6 +14,7 @@ client = AsyncIOMotorClient(MONGO_URI)
 db = client.courso
 
 
+# making a DB for users
 class User(BaseModel):
     username: str
     email: str
@@ -23,7 +24,7 @@ def user_serializer(user) -> dict:
     return {"id": str(user["_id"]), "username": user["username"], "email": user["email"]}
 
 
-# API Endpoints
+# API Endpoints for users DB
 @app.post("/register")
 async def register_user(user: User):
     user_dict = user.dict()
@@ -45,6 +46,50 @@ async def get_user(user_id: str):
     if user:
         return user_serializer(user)
     return {"error": "User not found"}
+
+
+#-------------------------------------------------------------------------
+# making a DB for topics for each person
+class Topic(BaseModel):
+    user_id : str
+    topic_name : str
+    known_parts : list[str] = [] # store the known parts to ignore them for course finding
+
+
+# API End POints for topics DB
+@app.post("/topics")
+async def add_topic(topic: Topic):
+    topic_dict = topic.dict()
+    results = await db.topics.inser_one(topic_dict)
+    return {"message": "Topic added", "id": str(result.inserted_id)}
+
+
+@app.put("/topics/{topic_id}")
+async def update_known_parts(topic_id : str, known_parts: list[str]):
+    result = await db.topics.update_one(
+        {'id':ObjectId(topic_id)},
+        {'$set':{'known_parts': known_parts}})
+    return {'messege':'Updated known parts' if result.modified_count else {'error': 'Topic Not Found'}}
+
+
+@app.get("/topics/{user_id}")
+async def get_topics(user_id:str):
+    topics = await db.topics.find({"user_id": user_id}).to_list(None)
+    return [{"id": str(topic['_id']), 'topic_name': topic["topic_name"]} for topic in topics]
+
+
+# making a DB of roadmaps (here we should integrate with roadmap.sh and use real ai made roadmaps)
+# two roadmaps for example (fron GPT)
+roadmaps = {"Python": ["Basics", "OOP", "Databases", "APIs", "Machine Learning"],
+    "AI": ["Math Foundations", "Deep Learning", "NLP", "Computer Vision"]}
+
+
+# API Endpoints for roadmaps
+@app.get("/roadmap/{topic_name}")
+async def get_roadmap(topic_name: str):
+    if topic_name in roadmaps:
+        return {"topic": topic_name, "roadmap": roadmaps[topic_name]}
+    return {"error": "No roadmap found"}
 
 # Run the server
 if __name__ == "__main__":
