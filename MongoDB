@@ -1,17 +1,34 @@
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException
 from pydantic import BaseModel
 from motor.motor_asyncio import AsyncIOMotorClient
+import asyncio
 from bson import ObjectId
 import uvicorn
 import bcrypt
-
+from pymongo.mongo_client import MongoClient
+from pymongo.server_api import ServerApi
 # Initialize FastAPI
 app = FastAPI()
 
 # MongoDB Connection
-MONGO_URI = "mongodb+srv://manyabarati:<db_password>@courso.blab1.mongodb.net/?retryWrites=true&w=majority&appName=courso"
-client = AsyncIOMotorClient(MONGO_URI)
-db = client.courso
+import motor.motor_asyncio
+import asyncio
+
+MONGO_URL = "mongodb+srv://manyabarati:1@courso.mongodb.net/coursodb?retryWrites=true&w=majority"
+
+client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
+db = client["coursodb"]  # Database
+collection = db["courso"]  # Collection
+
+
+async def test_connection():
+    try:
+        documents = await collection.find().to_list(5)  # Fetch 5 documents
+        print("✅ Connected! Sample Documents:", documents)
+    except Exception as e:
+        print("❌ Connection Failed:", e)
+
+asyncio.run(test_connection())
 
 
 # making a DB for users
@@ -20,6 +37,7 @@ class User(BaseModel):
     email: str
     password: str  # remmember to hash passwords! (I should search more in plasmic)
 
+
 def user_serializer(user) -> dict:
     return {"id": str(user["_id"]), "username": user["username"], "email": user["email"]}
 
@@ -27,6 +45,10 @@ def user_serializer(user) -> dict:
 # API Endpoints for users DB
 @app.post("/register")
 async def register_user(user: User):
+    existing_user = await db.users.find_one({"username": user.username})
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Username already taken")
+
     user_dict = user.dict()
     result = await db.users.insert_one(user_dict)
     return {"message": "User created", "id": str(result.inserted_id)}
@@ -36,8 +58,17 @@ async def register_user(user: User):
 async def login(user: User):
     stored_user = await db.users.find_one({"email": user.email})
     if not stored_user or stored_user["password"] != user.password:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
     return {"message": "Login successful!"}
+
+
+# API endpoint for checking a username
+@app.get("/users/username/{username}")
+async def check_username(username: str):
+    user = await db.users.find_one({"username": username})
+    if user:
+        return user_serializer(user)  # User exists ✅
+    return {"error": "User not found"}  # User does not exist ❌
 
 
 @app.get("/users/{user_id}")
@@ -47,6 +78,11 @@ async def get_user(user_id: str):
         return user_serializer(user)
     return {"error": "User not found"}
 
+
+@app.get("/users")
+async def get_all_users():
+    users = await db.users.find_one().to_list(None)
+    return [user_serializer(user) for user in users]
 
 #-------------------------------------------------------------------------
 # making a DB for topics for each person
@@ -60,14 +96,14 @@ class Topic(BaseModel):
 @app.post("/topics")
 async def add_topic(topic: Topic):
     topic_dict = topic.dict()
-    results = await db.topics.inser_one(topic_dict)
+    results = await db.topics.insert_one(topic_dict)
     return {"message": "Topic added", "id": str(result.inserted_id)}
 
 
 @app.put("/topics/{topic_id}")
 async def update_known_parts(topic_id : str, known_parts: list[str]):
     result = await db.topics.update_one(
-        {'id':ObjectId(topic_id)},
+        {'_id':ObjectId(topic_id)},
         {'$set':{'known_parts': known_parts}})
     return {'messege':'Updated known parts' if result.modified_count else {'error': 'Topic Not Found'}}
 
@@ -77,7 +113,7 @@ async def get_topics(user_id:str):
     topics = await db.topics.find({"user_id": user_id}).to_list(None)
     return [{"id": str(topic['_id']), 'topic_name': topic["topic_name"]} for topic in topics]
 
-
+# -------------------------------------------------------------------------------------------------
 # making a DB of roadmaps (here we should integrate with roadmap.sh and use real ai made roadmaps)
 # two roadmaps for example (fron GPT)
 roadmaps = {"Python": ["Basics", "OOP", "Databases", "APIs", "Machine Learning"],
@@ -91,6 +127,76 @@ async def get_roadmap(topic_name: str):
         return {"topic": topic_name, "roadmap": roadmaps[topic_name]}
     return {"error": "No roadmap found"}
 
+# -------------------------------------------------------------------------------------------
+# making a DB for source content for each topic based on unknown parts of roadmap using AI
+class SourceContent(BaseModel):
+    topic_name: str
+    sources: dict[str, list]
+
+
+# API Endpoints for source content
+@app.post("/source-content")
+async def add_source_content(content: SourceContent):
+    content_dict = content.dict()
+    result = await db.source_content.insert_one(content_dict)
+    return {"message": "Source content added", "id": str(result.inserted_id)}
+
+
+# retrive source content
+@app.get("/source-content/{topic_name}")
+async def get_source_content(topic_name: str):
+    content = await db.source_content.find_one({"topic_name": topic_name})
+    if content:
+        return {"id": str(content["_id"]), "topic_name": content["topic_name"], "sources": content["sources"]}
+    return {"error": "No source content found"}
+
+
+# Making a DB for tracking progress
+class Progress(BaseModel):
+    user_id: str
+    topic_name: str
+    source_type: str  # Example: "YouTube", "Coursera", "TextBook"
+    session_number: int = 0  # Session/page number
+    progress_value: float = 0.0  # Time watched or pages read (not complete sessions)
+
+
+@app.post("/progress")
+async def update_progress(progress: Progress):
+    query = {"user_id": progress.user_id, "topic_name": progress.topic_name, "source_type": progress.source_type, "session_number": progress.session_number}
+    update = {"$set": {"progress_value": progress.progress_value}}
+    result = await db.progress.update_one(query, update, upsert=True)
+    return {"message": "Progress updated"}
+
+
+@app.get("/progress/{user_id}/{topic_name}")
+async def get_progress(user_id: str, topic_name: str):
+    progress = await db.progress.find({"user_id": user_id, "topic_name": topic_name}).to_list(None)
+    return progress if progress else {"error": "No progress found"}
+
+
+'''{YouTube: [#number of sessions (int), average time of sessions in minuites(int/float), type(str), language(str),
+ level(str/int), other tags(str)], Couresera: [#number of sessions (int), average time of sessions in minuites(int/float),
+  type(str), language(str), level(str/int), other tags(str)], Udemy: [#number of sessions (int),
+   average time of sessions in minuites(int/float), type(str), language(str), level(str/int), other tags(str)],
+    Maktabkhooneh: [#number of sessions (int), average time of sessions in minuites(int/float), type(str), language(str),
+     level(str/int), other tags(str)], Local video: [#number of sessions (int),
+      average time of sessions in minuites(int/float), type(str), language(str), level(str/int), other tags(str)], 
+      TextBook: [#number of pages (int), type(str), language(str), level(str/int), other tags(str)], 
+      Local Text: [#number of pages (int), type(str), language(str), level(str/int), other tags(str)]}'''
+
+
+
+
+
+
+
+
+
+
+
+
+
 # Run the server
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
