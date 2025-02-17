@@ -43,15 +43,36 @@ async def test_connection():
         print(f"❌ Connection Failed: {e}")
 
 
+# Ensure test connection is run asynchronously when the app starts
+@app.on_event("startup")
+async def startup_event():
+    await test_connection()
+
+
+# Define your routes here (e.g., a simple test route)
+@app.get("/")
+async def read_root():
+    return {"message": "Welcome to FastAPI!"}
+
+
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins (change to frontend URL if needed)
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all methods (GET, POST, OPTIONS, etc.)
+    allow_headers=["*"],  # Allow all headers
+)
+
+
 # making a DB for users
 class User(BaseModel):
     username: str
-    email: str
     password: str  # remmember to hash passwords! (I should search more in plasmic)
 
 
 def user_serializer(user) -> dict:
-    return {"id": str(user["_id"]), "username": user["username"], "email": user["email"]}
+    return {"id": str(user["_id"]), "username": user["username"]}
 
 
 # API Endpoints for users DB
@@ -68,7 +89,7 @@ async def register_user(user: User):
 
 @app.post("/login")
 async def login(user: User):
-    stored_user = await db.users.find_one({"email": user.email})
+    stored_user = await db.users.find_one({"username": user.username})
     if not stored_user or stored_user["password"] != user.password:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     return {"message": "Login successful!"}
@@ -94,21 +115,24 @@ async def get_user(user_id: str):
 @app.get("/users")
 async def get_all_users():
     users = await db.users.find_one().to_list(None)
+    print([user_serializer(user) for user in users])
     return [user_serializer(user) for user in users]
+
+
 
 #-------------------------------------------------------------------------
 # making a DB for topics for each person
 class Topic(BaseModel):
     user_id : str
     topic_name : str
-    known_parts : list[str] = [] # store the known parts to ignore them for course finding
+    unknown_parts : list[str] = [] # store the unknown parts to learn them for course finding
 
 
 # API End POints for topics DB
 @app.post("/topics")
 async def add_topic(topic: Topic):
     topic_dict = topic.dict()
-    results = await db.topics.insert_one(topic_dict)
+    result = await db.topics.insert_one(topic_dict)
     return {"message": "Topic added", "id": str(result.inserted_id)}
 
 
@@ -195,18 +219,6 @@ async def get_progress(user_id: str, topic_name: str):
       average time of sessions in minuites(int/float), type(str), language(str), level(str/int), other tags(str)], 
       TextBook: [#number of pages (int), type(str), language(str), level(str/int), other tags(str)], 
       Local Text: [#number of pages (int), type(str), language(str), level(str/int), other tags(str)]}'''
-
-
-
-
-
-
-
-
-
-
-
-
 
 # Run the server
 if __name__ == "__main__":
